@@ -1,0 +1,5 @@
+{
+  "name": "api-e2e",
+  "description": "Diff branch, extract affected API endpoints, run curl tests, report pass/fail",
+  "version": "1.0.0"
+}
