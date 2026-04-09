@@ -24,16 +24,21 @@ cat docker-compose.yaml docker-compose.yml 2>/dev/null | head -200
 
 # Check for API gateway or reverse proxy configs
 find . -maxdepth 4 \( -name "*.yaml" -o -name "*.yml" -o -name "*.conf" \) | xargs grep -l "upstream\|proxy_pass\|routes\|gateway" 2>/dev/null | head -10
+
+# Check for project-specific CLI tools
+ls -1 *-cli* cli-* bin/ scripts/ Makefile 2>/dev/null
+grep -iE "\bcli\b|wrapper|command.*(exec|run|build|logs)" CLAUDE.md README.md 2>/dev/null | head -10
 ```
 
 Extract from the docs:
 - **Service topology**: Which services exist, their ports, how requests are routed
-- **API gateway prefixes**: Path prefixes added by API gateway/reverse proxy (e.g., `/hypatia/api/*` routes to `hypatia:8026`)
+- **API gateway prefixes**: Path prefixes added by API gateway/reverse proxy (e.g., `/service/api/*` routes to `service:8026`)
 - **Auth mechanism**: How authentication works (tokens, cookies, API keys), what headers are required
 - **Inter-service communication**: Event buses, message queues, webhook brokers, background workers
 - **Database and cache infrastructure**: MySQL, PostgreSQL, Redis, etc.
+- **Project CLI tools**: Check if the project has a custom CLI wrapper for running containers, executing commands, viewing logs, rebuilding services, etc. If one exists, **use it instead of raw `docker`/`docker-compose` commands** throughout all subsequent steps (e.g., `<project-cli> exec <service> ...` instead of `docker exec <service> ...`)
 
-This context is critical for later steps — especially for constructing correct URLs and understanding async/event-driven behavior.
+This context is critical for later steps — especially for constructing correct URLs, running commands in the right containers, and understanding async/event-driven behavior.
 
 ## Step 2 — Detect tech stack and base URL
 
@@ -78,9 +83,22 @@ Use `http://localhost:<PORT>` as `$BASE_URL`. If the project uses an API gateway
 
 ## Step 3 — Find changed files on this branch
 
+First, determine the correct base ref for diffing. If `$ARGUMENTS` is provided, use that as the base ref. Otherwise, detect the default remote's main branch:
+
 ```bash
-git diff origin/main...HEAD --name-only
-# If $ARGUMENTS provided: git diff $ARGUMENTS...HEAD --name-only
+# Detect the default remote and main branch
+DEFAULT_REMOTE=$(git remote | head -1)
+MAIN_REF="$DEFAULT_REMOTE/main"
+# Verify it exists
+git rev-parse --verify "$MAIN_REF" 2>/dev/null || MAIN_REF="$DEFAULT_REMOTE/master"
+git rev-parse --verify "$MAIN_REF" 2>/dev/null || echo "ERROR: Could not find main branch"
+echo "Using base ref: $MAIN_REF"
+```
+
+If the base ref cannot be resolved, **ask the user** which remote/branch to diff against (e.g., `opal/main`, `upstream/main`).
+
+```bash
+git diff "$MAIN_REF"...HEAD --name-only
 ```
 
 Classify each changed file by its architectural role. The concepts are universal even if path conventions differ by framework:
@@ -182,27 +200,32 @@ Also note:
 
 ## Step 6 — Analyze the semantic nature of changes (classify change type)
 
-Before building the test plan, analyze the **git diff content** (not just file names) to understand what the changes actually do. This determines whether you need simple CRUD endpoint testing, behavioral/load testing, or both.
+**THIS STEP IS CRITICAL — DO NOT SKIP IT.** The test plan quality depends entirely on correctly classifying what the changes do. Without this step, you will only generate basic CRUD tests and miss the most important behavioral/concurrency/async tests.
+
+Analyze the **actual git diff content** (not just file names) to understand what the changes do:
 
 ```bash
 # Read the actual diff to understand what changed
-git diff origin/main...HEAD --stat
-git diff origin/main...HEAD -- <key-changed-files> | head -500
+git diff $MAIN_REF...HEAD --stat
+git diff $MAIN_REF...HEAD -- <key-changed-files> | head -500
+
+# Look specifically for behavioral indicators in the diff
+git diff $MAIN_REF...HEAD | grep -E "redis|INCR|DECR|semaphore|acquire|release|event_handler|webhook|queue|worker|rate.limit|concurrency|throttl" | head -30
 ```
 
-Classify the changes into one or more categories:
+Classify the changes into one or more categories. **You MUST output this classification table explicitly** before proceeding to Step 7:
 
-| Category | Indicators | Testing strategy |
-|----------|-----------|------------------|
-| **New CRUD endpoints** | New route definitions, new controller methods | Standard endpoint testing (happy path, auth, validation) |
-| **Business logic changes** | Modified service/handler code, new domain rules | Behavioral verification — trigger the flow end-to-end |
-| **Rate limiting / throttling** | Redis keys, counters, semaphores, `INCR`/`DECR` | Load/concurrency testing with batched parallel requests |
-| **Async / event-driven flows** | Event handlers, webhook consumers, background workers, queues | Temporal testing — trigger, wait, monitor for completion |
-| **Concurrency control** | Locks, semaphores, mutexes, slot acquire/release | Concurrent request batches with monitoring |
-| **Infrastructure / config** | Settings, env vars, middleware, caching | Config verification, boundary testing |
-| **Database schema** | Migrations, model changes | State persistence verification |
+| Category | Indicators in diff | Testing strategy | Applies to this branch? |
+|----------|-------------------|------------------|------------------------|
+| **New CRUD endpoints** | New route definitions, new controller methods | → Part A: endpoint CRUD tests | YES / NO |
+| **Business logic changes** | Modified service/handler code, new domain rules | → Part B: behavioral verification | YES / NO |
+| **Rate limiting / throttling** | Redis keys, counters, semaphores, `INCR`/`DECR` | → Part C: load/concurrency testing | YES / NO |
+| **Async / event-driven flows** | Event handlers, webhook consumers, background workers, queues | → Part B: temporal testing | YES / NO |
+| **Concurrency control** | Locks, semaphores, mutexes, slot acquire/release | → Part C: concurrent batches | YES / NO |
+| **Infrastructure / config** | Settings, env vars, middleware, caching | → Part D: infrastructure checks | YES / NO |
+| **Database schema** | Migrations, model changes | → Part A: state persistence | YES / NO |
 
-If the changes include **async/event-driven flows** or **concurrency control**, the test plan MUST include behavioral tests (Steps 8-9), not just endpoint CRUD tests.
+**MANDATORY RULE:** If ANY category other than "New CRUD endpoints" is marked YES, you MUST include the corresponding test plan parts (B, C, or D). Generating only Part A (CRUD tests) when the diff contains event handlers, Redis operations, or concurrency logic is an incomplete test plan.
 
 ## Step 7 — Prompt for auth token
 
@@ -218,7 +241,9 @@ Store tokens as `$TOKEN_<ROLE>` (e.g. `$TOKEN_ADMIN`, `$TOKEN_USER`). If only on
 
 ## Step 8 — Build the test plan
 
-Based on the change classification from Step 6, build an appropriate test plan. The plan should include **all applicable sections** below.
+Based on the change classification from Step 6, build an appropriate test plan. **Include every Part (A/B/C/D) that was marked YES in the Step 6 classification table.** If you only generate Part A when other categories were marked YES, your test plan is incomplete — go back and add the missing parts.
+
+For example, if the diff contains both new API endpoints AND Redis concurrency semaphores AND event handler changes, your test plan MUST include Part A + Part B + Part C + Part D.
 
 ### Part A — Endpoint CRUD tests (always include for new/changed endpoints)
 
@@ -361,6 +386,22 @@ Final line: **`X/Y tests passed.`**
 
 If any tests failed, list them with actual vs expected values and suggest likely causes.
 
+## Command permissions
+
+**Run freely (no confirmation needed):**
+- `git` — all read-only commands: `diff`, `log`, `show`, `branch`, `remote`, `rev-parse`, `status`
+- `gh` — all read-only commands: `pr view`, `issue view`, `api` (GET)
+- `docker` — read-only commands: `exec ... <read commands>`, `logs`, `ps`, `inspect`
+- `curl -s ... -X GET` or `curl -s ...` (GET is the default) — read-only API calls
+- `python3 -c` — for JSON parsing
+- Project CLI tools (discovered in Step 1) — read-only equivalents of the above
+
+**Ask the user before running (mutating commands):**
+- `curl -X POST/PUT/PATCH/DELETE` — these modify server state
+- Present the curl command to the user and wait for approval before executing
+
+**Auto-permit mode:** If the user responds with "yes to all", "auto-permit", or grants blanket approval for mutating requests, execute all remaining `curl POST/PUT/PATCH/DELETE` commands without asking for each one individually.
+
 ## Rules
 
 - Never hardcode tokens in output — always refer to them as `$TOKEN`, `$TOKEN_ADMIN`, etc.
@@ -368,7 +409,7 @@ If any tests failed, list them with actual vs expected values and suggest likely
 - If the server is not reachable, stop at Step 2 and tell the user
 - Use `python3` for JSON parsing — never assume `jq` is available
 - For sequenced tests (create → verify → cleanup), track created IDs and use them in subsequent steps
-- If `$ARGUMENTS` is provided, treat it as the base ref to diff against instead of `origin/main`
+- If `$ARGUMENTS` is provided, treat it as the base ref to diff against instead of the auto-detected `$MAIN_REF`
 - When the framework is ambiguous, read a sample route file before guessing — don't assume
 - Always read project documentation (CLAUDE.md, README) before starting — service architecture context is essential
 - When changes affect event handlers, workers, or async flows, behavioral tests are mandatory — not just endpoint CRUD tests
