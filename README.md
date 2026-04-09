@@ -1,4 +1,4 @@
-# claude-skills
+# claude-toolbox
 
 A collection of [Claude Code](https://claude.ai/code) skills — slash commands that run inside Claude Code sessions.
 
@@ -13,8 +13,8 @@ A collection of [Claude Code](https://claude.ai/code) skills — slash commands 
 ### Option A — Plugin marketplace (recommended)
 
 ```
-/plugin marketplace add kmtusher97/claude-skills
-/plugin install api-e2e@kmtusher97-claude-skills
+/plugin marketplace add kmtusher97/claude-toolbox
+/plugin install api-e2e@kmtusher97-claude-toolbox
 ```
 
 ### Option B — Manual (one skill)
@@ -22,15 +22,15 @@ A collection of [Claude Code](https://claude.ai/code) skills — slash commands 
 ```bash
 SKILL=api-e2e
 mkdir -p ~/.claude/skills/$SKILL
-curl -sSL https://raw.githubusercontent.com/kmtusher97/claude-skills/main/plugins/$SKILL/skills/$SKILL/SKILL.md \
+curl -sSL https://raw.githubusercontent.com/kmtusher97/claude-toolbox/main/plugins/$SKILL/skills/$SKILL/SKILL.md \
   -o ~/.claude/skills/$SKILL/SKILL.md
 ```
 
 ### Option C — Clone and symlink (all skills)
 
 ```bash
-git clone https://github.com/kmtusher97/claude-skills ~/claude-skills
-ln -s ~/claude-skills/plugins/api-e2e/skills/api-e2e ~/.claude/skills/api-e2e
+git clone https://github.com/kmtusher97/claude-toolbox ~/claude-toolbox
+ln -s ~/claude-toolbox/plugins/api-e2e/skills/api-e2e ~/.claude/skills/api-e2e
 ```
 
 ## Usage
