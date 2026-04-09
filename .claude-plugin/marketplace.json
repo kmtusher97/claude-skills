@@ -4,13 +4,12 @@
     "name": "kmtusher97"
   },
   "metadata": {
-    "description": "A collection of Claude Code skills",
-    "pluginRoot": "./plugins"
+    "description": "A collection of Claude Code skills"
   },
   "plugins": [
     {
       "name": "api-e2e",
-      "source": "api-e2e",
+      "source": "./plugins/api-e2e",
       "description": "Diff branch, extract affected API endpoints, run curl tests, report pass/fail",
       "version": "1.0.0"
     }
