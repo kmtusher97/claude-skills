@@ -1,79 +1,52 @@
-# api-e2e — Claude Code Skill
+# claude-skills
 
-A Claude Code skill that analyzes your branch diff, discovers every API endpoint that was added or modified, builds a structured test plan, executes it against your local server with `curl`, and reports a pass/fail summary.
+A collection of [Claude Code](https://claude.ai/code) skills — slash commands that run inside Claude Code sessions.
 
-Works with **any backend framework**: Express, Fastify, NestJS, FastAPI, Flask, Django, Rails, Go/chi, Go/gin, Laravel, Spring Boot, and others.
+## Skills
 
-## What it does
-
-1. **Detects your tech stack** and finds the local server port
-2. **Diffs the branch** (`origin/main...HEAD`) and classifies changed files into routes, controllers, services, schemas, and client code
-3. **Extracts affected endpoints** using framework-specific patterns
-4. **Prompts for auth tokens** (Bearer, API key, cookie — whatever your API uses)
-5. **Builds a test plan** covering happy path, auth missing, wrong role, invalid body, state verification, and cleanup — shows it to you before running
-6. **Executes each test** sequentially with `curl` + `python3` for JSON assertions
-7. **Reports** a pass/fail table and suggests causes for any failures
+| Skill | Command | Description |
+|-------|---------|-------------|
+| [api-e2e](./api-e2e/) | `/api-e2e` | Diff branch, extract affected API endpoints, run curl tests, report pass/fail |
 
 ## Installation
 
-### Option A — Claude Code CLI (recommended)
+### Option A — Claude Code CLI
 
 ```bash
-claude skills install https://github.com/<your-username>/claude-skill-api-e2e
+# Install a specific skill
+claude skills install https://github.com/<your-username>/claude-skills/tree/main/api-e2e
 ```
 
-### Option B — Manual
+### Option B — Manual (one skill)
 
 ```bash
-mkdir -p ~/.claude/skills/api-e2e
-curl -sSL https://raw.githubusercontent.com/<your-username>/claude-skill-api-e2e/main/SKILL.md \
-  -o ~/.claude/skills/api-e2e/SKILL.md
+SKILL=api-e2e
+mkdir -p ~/.claude/skills/$SKILL
+curl -sSL https://raw.githubusercontent.com/<your-username>/claude-skills/main/$SKILL/SKILL.md \
+  -o ~/.claude/skills/$SKILL/SKILL.md
+```
+
+### Option C — Clone and symlink (all skills)
+
+```bash
+git clone https://github.com/<your-username>/claude-skills ~/claude-skills
+# Then symlink whichever skills you want:
+ln -s ~/claude-skills/api-e2e ~/.claude/skills/api-e2e
 ```
 
 ## Usage
 
-In any Claude Code session, with your local server running:
+Once installed, invoke any skill inside a Claude Code session:
 
 ```
 /api-e2e
+/api-e2e origin/dev     # diff against a custom base branch
 ```
-
-To diff against a different base branch:
-
-```
-/api-e2e origin/dev
-```
-
-## Test cases generated
-
-| Scenario | Applies to |
-|----------|-----------|
-| Happy path (2xx) | All endpoints |
-| Auth missing (401) | All authenticated endpoints |
-| Wrong role (403) | Role-restricted endpoints |
-| Invalid body (400/422) | Endpoints with validation |
-| State verification (GET after mutation) | POST/PUT/PATCH/DELETE |
-| Cleanup (restore original state) | POST/PUT/PATCH/DELETE |
-| Order preserved after add/update | Ordering endpoints |
-| Idempotent reorder | Ordering endpoints |
-| Empty result / boundary values | Paginated/filtered endpoints |
 
 ## Requirements
 
-- Claude Code CLI
-- `curl` and `python3` available in your shell
-- Local dev server running before invoking the skill
-
-## Supported frameworks
-
-| Language | Frameworks |
-|----------|-----------|
-| Node.js | Express, Fastify, Hono, NestJS |
-| Python | FastAPI, Flask, Django |
-| Ruby | Rails |
-| Go | chi, gin, echo, gorilla/mux |
-| Java/Kotlin | Spring Boot |
-| PHP | Laravel |
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
+- `curl` and `python3` in your shell
 
 ## License
 
