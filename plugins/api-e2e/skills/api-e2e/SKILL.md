@@ -1,13 +1,13 @@
 ---
 name: api-e2e
-description: Analyze branch changes, identify affected API endpoints across any framework, build a test plan, prompt for auth tokens, execute all tests with curl, and report a pass/fail summary
+description: Analyze branch changes, identify affected API endpoints across any framework, build a test plan (saved to temp file), prompt for auth tokens, generate a Python test runner script (saved to temp file), execute it, and report a pass/fail summary
 user-invocable: true
 allowed-tools: Bash, Read, Glob, Grep
 ---
 
 # API E2E Test & Verify
 
-Analyze the current branch diff, discover every API endpoint that was added or modified, build a structured test plan, execute it against the running local server, and report a pass/fail summary.
+Analyze the current branch diff, discover every API endpoint that was added or modified, build a structured test plan (saved to a temp file), generate a Python test runner script (saved to a temp file), execute it against the running local server, and report a pass/fail summary.
 
 Works with any backend framework — Express, Fastify, NestJS, FastAPI, Flask, Django, Rails, Go/chi, Go/gin, Laravel, Spring Boot, and others.
 
@@ -318,35 +318,41 @@ When the diff reveals changes to event handlers, background workers, webhook con
    - Read service logs for expected log entries
 3. **Verify the end state** — confirm the final state matches expectations
 
-Example monitoring script pattern:
-```bash
-# Trigger the action
-curl -s -X POST "$BASE_URL/trigger-endpoint" -H "Authorization: Bearer $TOKEN" -d '...'
-
-# Monitor for completion (poll every N seconds, timeout after M seconds)
-for i in $(seq 1 <max_attempts>); do
-  result=$(curl -s "$BASE_URL/status-endpoint" -H "Authorization: Bearer $TOKEN")
-  status=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))")
-  if [ "$status" = "completed" ]; then
-    echo "✓ Flow completed after ${i} checks"
-    break
-  fi
-  sleep <interval>
-done
+These tests are implemented in the Python test runner script as polling functions. Example pattern (included in the generated script):
+```python
+def test_N_poll():
+    """Poll for async completion after triggering the flow."""
+    # First trigger the async flow
+    status, body, raw = make_request("POST", "/trigger-endpoint",
+                                      headers=auth_header("$TOKEN"), body={...})
+    # Then poll for completion
+    max_attempts = 10
+    interval = 2  # seconds
+    for attempt in range(1, max_attempts + 1):
+        status, body, raw = make_request("GET", "/status-endpoint",
+                                          headers=auth_header("$TOKEN"))
+        if body.get("status") == "completed":
+            record(N, "Async flow completed", True)
+            return
+        time.sleep(interval)
+    record(N, "Async flow completed", False, f"timed out after {max_attempts * interval}s")
 ```
 
 ### Part C — Load / concurrency tests (when Step 4 classified rate limiting or concurrency control as YES)
 
 When the diff reveals rate limiting, concurrency semaphores, or throttling logic:
 
-1. **Design batched concurrent requests** — send N requests in parallel batches with controlled delays:
-   ```bash
-   # Send batch of 5 concurrent requests
-   for i in $(seq 1 5); do
-     curl -s -X POST "$BASE_URL/endpoint" -H "Authorization: Bearer $TOKEN" -d '...' &
-   done
-   wait
-   sleep <delay_between_batches>
+1. **Design batched concurrent requests** — these are implemented in the Python test runner using `ThreadPoolExecutor`:
+   ```python
+   def test_N_concurrent():
+       batch_size = 5
+       def fire():
+           return make_request("POST", "/endpoint", headers=auth_header("$TOKEN"), body={...})
+       with ThreadPoolExecutor(max_workers=batch_size) as pool:
+           futures = [pool.submit(fire) for _ in range(batch_size)]
+           for f in as_completed(futures):
+               status, body, raw = f.result()
+               # tally accepted vs rejected
    ```
 
 2. **Monitor rate limiting behavior** — check that the system correctly:
@@ -356,7 +362,7 @@ When the diff reveals rate limiting, concurrency semaphores, or throttling logic
 
 3. **Verify recovery** — after the rate limit window passes, confirm new requests are accepted
 
-4. **Check infrastructure state** — examine Redis counters, queue depths, or database state to confirm the limiting mechanism is working:
+4. **Check infrastructure state** — examine Redis counters, queue depths, or database state to confirm the limiting mechanism is working. Use separate bash commands for infrastructure checks that cannot be done via HTTP:
    ```bash
    # Check Redis counters (if accessible)
    docker exec <redis-container> redis-cli GET "rate_limit_key:*"
@@ -379,29 +385,280 @@ docker logs <service> --since="<start_time>" 2>&1 | grep -c "rate_limit_exceeded
 docker logs <service> --since="<start_time>" 2>&1 | grep -c "concurrency_slot_acquired"
 ```
 
-Present the full numbered checklist to the user, then ask:
+### Save the test plan to a temporary file
 
-> Ready to execute? (yes / skip \<number\> / abort)
+After building the complete test plan, save it as a Markdown table to a temporary file. The file path MUST be `/tmp/api-e2e-test-plan-<timestamp>.md` where `<timestamp>` is the current Unix timestamp.
 
-## Step 9 — Execute tests
+The test plan file MUST contain a table with these columns:
 
-Run each test case sequentially using `curl`. Use `python3 -c` for JSON parsing (do **not** assume `jq` is installed).
+```markdown
+# API E2E Test Plan
+Generated: <ISO 8601 timestamp>
+Base URL: <$BASE_URL>
+Branch: <current branch name>
 
-Adapt the auth flag to the scheme in use:
-- Bearer token → `-H "Authorization: Bearer $TOKEN"`
-- API key header → `-H "X-API-Key: $TOKEN"` (or whichever header the API uses)
-- Cookie / session → `-b "session=<value>"`
-- Additional headers → include all required headers discovered in Steps 1 and 5
+## Test Cases
 
-For each test case output:
-- `✓ [N] <description>` on pass
-- `✗ [N] <description>` on fail — show expected vs actual status code and relevant response body fields
+| # | Part | Method | Endpoint | Scenario | Expected Status | Auth | Request Body | Depends On | Cleanup |
+|---|------|--------|----------|----------|-----------------|------|--------------|------------|---------|
+| 1 | A    | POST   | /api/v1/... | Happy path | 201 | $TOKEN | {"key": "value"} | — | DELETE /api/v1/.../{{id}} |
+| 2 | A    | POST   | /api/v1/... | Auth missing | 401 | none | {"key": "value"} | — | — |
+| 3 | A    | POST   | /api/v1/... | Invalid body | 400 | $TOKEN | {} | — | — |
+| 4 | B    | POST   | /api/v1/... | Trigger async flow | 202 | $TOKEN | {"key": "value"} | — | — |
+| 5 | B    | GET    | /api/v1/.../status | Poll completion | 200 | $TOKEN | — | 4 | — |
+| 6 | C    | POST   | /api/v1/... | Concurrent batch (5x) | 429 (some) | $TOKEN | {"key": "value"} | — | — |
+```
 
-**Token expiry:** if a request returns 401 unexpectedly (not a test specifically for auth failure), pause and ask for a fresh token, then retry from that test case.
+Column definitions:
+- **#**: Sequential test number
+- **Part**: Which test plan part (A/B/C/D)
+- **Method**: HTTP method
+- **Endpoint**: Full path as seen by client (including gateway prefix)
+- **Scenario**: Brief description of what is being tested
+- **Expected Status**: Expected HTTP status code(s)
+- **Auth**: Which token variable to use, or `none` for auth-missing tests
+- **Request Body**: JSON payload (use `—` for GET requests with no body)
+- **Depends On**: Test number this depends on (for sequenced tests), or `—`
+- **Cleanup**: Cleanup action to run after this test, or `—`
 
-**Cleanup:** after all tests, run any registered cleanup calls (soft-deletes, reverting state) even if earlier tests failed.
+Write this file using `python3`:
 
-**For behavioral/load tests:** execute the monitoring scripts, capture their output, and include results in the report.
+```bash
+python3 -c "
+import os, time
+plan = '''<the full markdown table content>'''
+path = f'/tmp/api-e2e-test-plan-{int(time.time())}.md'
+with open(path, 'w') as f:
+    f.write(plan)
+print(f'Test plan saved to: {path}')
+"
+```
+
+Print the test plan table to the user, then tell them the file path, and ask:
+
+> Test plan saved to `<path>`. Ready to execute? (yes / skip \<number\> / abort)
+
+## Step 9 — Generate and execute the Python test runner
+
+**Do NOT run curl commands directly.** Instead, generate a Python test runner script, save it to `/tmp/api-e2e-runner-<timestamp>.py`, and execute it.
+
+The script MUST:
+- Use only `urllib.request` and `urllib.error` from the standard library (do **not** assume `requests` is installed)
+- Accept auth tokens and base URL via environment variables
+- Read the test plan from the saved file (Step 8)
+- Execute tests sequentially, respecting `Depends On` ordering
+- Track created resource IDs for use in dependent tests and cleanup
+- Print `✓ [N] <description>` on pass and `✗ [N] <description>` on fail with expected vs actual details
+- Run cleanup actions even if earlier tests failed
+- For behavioral tests (Part B): implement polling loops with configurable timeout and interval
+- For load/concurrency tests (Part C): use `concurrent.futures.ThreadPoolExecutor` to send parallel batches
+- Exit with code 0 if all tests pass, 1 if any fail
+- Print a final summary table to stdout
+
+Generate the script with this structure:
+
+```python
+#!/usr/bin/env python3
+"""API E2E Test Runner — auto-generated"""
+
+import json
+import os
+import sys
+import time
+import urllib.request
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+BASE_URL = os.environ.get("BASE_URL", "<detected_base_url>")
+TOKEN = os.environ.get("TOKEN", "")
+TOKEN_ADMIN = os.environ.get("TOKEN_ADMIN", "")
+TOKEN_USER = os.environ.get("TOKEN_USER", "")
+
+# Additional required headers discovered in Steps 1 and 5
+EXTRA_HEADERS = {
+    # e.g. "x-custom-header": "value"
+}
+
+results = []       # list of (test_num, description, passed, detail)
+created_ids = {}   # test_num -> created resource ID for dependent tests
+cleanups = []      # list of (method, url, headers) to run at the end
+
+
+def make_request(method, path, headers=None, body=None, timeout=30):
+    """Make an HTTP request and return (status_code, response_body_dict, raw_body)."""
+    url = f"{BASE_URL}{path}"
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    if headers:
+        for k, v in headers.items():
+            req.add_header(k, v)
+    for k, v in EXTRA_HEADERS.items():
+        req.add_header(k, v)
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        raw = resp.read().decode()
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            parsed = {}
+        return resp.status, parsed, raw
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode() if e.fp else ""
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            parsed = {}
+        return e.code, parsed, raw
+
+
+def auth_header(token_var):
+    """Build auth header dict from token variable name."""
+    token = {"$TOKEN": TOKEN, "$TOKEN_ADMIN": TOKEN_ADMIN, "$TOKEN_USER": TOKEN_USER}.get(token_var, "")
+    if not token or token_var == "none":
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def record(test_num, description, passed, detail=""):
+    """Record a test result."""
+    mark = "✓" if passed else "✗"
+    print(f"  {mark} [{test_num}] {description}" + (f" — {detail}" if detail and not passed else ""))
+    results.append((test_num, description, passed, detail))
+
+
+def run_cleanup():
+    """Run all registered cleanup actions."""
+    if not cleanups:
+        return
+    print("\n--- Cleanup ---")
+    for method, url, headers in cleanups:
+        try:
+            req = urllib.request.Request(url, method=method)
+            req.add_header("Content-Type", "application/json")
+            for k, v in (headers or {}).items():
+                req.add_header(k, v)
+            for k, v in EXTRA_HEADERS.items():
+                req.add_header(k, v)
+            resp = urllib.request.urlopen(req, timeout=30)
+            print(f"  ✓ Cleanup {method} {url} → {resp.status}")
+        except urllib.error.HTTPError as e:
+            print(f"  ✗ Cleanup {method} {url} → {e.code}")
+        except Exception as e:
+            print(f"  ✗ Cleanup {method} {url} → {e}")
+
+
+# ──────────────────────────────────────────────
+# Test cases — fill in from the test plan table
+# ──────────────────────────────────────────────
+
+def test_N():
+    """Test N: <description>"""
+    status, body, raw = make_request(
+        "<METHOD>", "<path>",
+        headers=auth_header("<token_var>"),
+        body=<body_dict_or_None>,
+    )
+    passed = status == <expected_status>
+    record(N, "<description>", passed,
+           f"expected {<expected_status>}, got {status}" if not passed else "")
+    # If this test creates a resource, store its ID:
+    # created_ids[N] = body.get("id")
+    # If cleanup is needed, register it:
+    # cleanups.append(("DELETE", f"{BASE_URL}<cleanup_path>/{body.get('id')}", auth_header("<token_var>")))
+
+# --- Part B: Behavioral / async tests ---
+
+def test_N_poll():
+    """Test N: Poll for async completion"""
+    max_attempts = 10
+    interval = 2  # seconds
+    for attempt in range(1, max_attempts + 1):
+        status, body, raw = make_request("GET", "<status_path>", headers=auth_header("<token_var>"))
+        if body.get("status") == "completed":
+            record(N, "<description>", True)
+            return
+        time.sleep(interval)
+    record(N, "<description>", False, f"timed out after {max_attempts * interval}s")
+
+# --- Part C: Load / concurrency tests ---
+
+def test_N_concurrent():
+    """Test N: Concurrent batch request"""
+    batch_size = 5
+    accepted = 0
+    rejected = 0
+
+    def fire():
+        return make_request("POST", "<path>", headers=auth_header("<token_var>"), body=<body>)
+
+    with ThreadPoolExecutor(max_workers=batch_size) as pool:
+        futures = [pool.submit(fire) for _ in range(batch_size)]
+        for f in as_completed(futures):
+            status, body, raw = f.result()
+            if status in (200, 201, 202):
+                accepted += 1
+            else:
+                rejected += 1
+
+    expected_accepted = <N>
+    expected_rejected = batch_size - expected_accepted
+    passed = accepted == expected_accepted
+    record(N, "<description>",
+           passed, f"accepted={accepted} rejected={rejected}, expected accepted={expected_accepted}")
+
+
+# ──────────────────────────────────────────────
+
+if __name__ == "__main__":
+    print(f"Running API E2E tests against {BASE_URL}\n")
+
+    # Execute all test functions in order
+    # test_1()
+    # test_2()
+    # ...
+
+    # Always run cleanup
+    run_cleanup()
+
+    # Summary
+    passed = sum(1 for _, _, p, _ in results if p)
+    total = len(results)
+    print(f"\n{'='*50}")
+    print(f"  {passed}/{total} tests passed.")
+    print(f"{'='*50}")
+    sys.exit(0 if passed == total else 1)
+```
+
+**Fill in every `test_N` function** from the test plan table. Each row in the table becomes one function. For sequenced tests, use `created_ids[<depends_on>]` to reference IDs from earlier tests.
+
+Save the script:
+
+```bash
+python3 -c "
+script = '''<the full python script content>'''
+path = '/tmp/api-e2e-runner-$(date +%s).py'
+with open(path, 'w') as f:
+    f.write(script)
+print(f'Test runner saved to: {path}')
+"
+```
+
+Tell the user the file path and show them the test runner script content for review.
+
+After user approval, execute the script:
+
+```bash
+TOKEN="<user_provided_token>" \
+TOKEN_ADMIN="<if_provided>" \
+TOKEN_USER="<if_provided>" \
+BASE_URL="<detected_base_url>" \
+python3 /tmp/api-e2e-runner-<timestamp>.py
+```
+
+**Token expiry:** if the script reports unexpected 401s (not from auth-missing tests), pause and ask for a fresh token, then re-run the script with the new token.
+
+**The script handles cleanup automatically** — cleanup actions registered during test execution run at the end even if earlier tests fail.
 
 ## Step 10 — Report
 
@@ -430,26 +687,27 @@ If any tests failed, list them with actual vs expected values and suggest likely
 - `git` — all read-only commands: `diff`, `log`, `show`, `branch`, `remote`, `rev-parse`, `status`
 - `gh` — all read-only commands: `pr view`, `issue view`, `api` (GET)
 - `docker` — read-only commands: `exec ... <read commands>`, `logs`, `ps`, `inspect`
-- `curl -s ... -X GET` or `curl -s ...` (GET is the default) — read-only API calls
-- `python3 -c` — for JSON parsing
+- `python3 -c` — for JSON parsing and writing temp files
+- `python3 /tmp/api-e2e-runner-*.py` — executing the generated test runner
 - Project CLI tools (discovered in Step 1) — read-only equivalents of the above
 
 **Ask the user before running (mutating commands):**
-- `curl -X POST/PUT/PATCH/DELETE` — these modify server state
-- Present the curl command to the user and wait for approval before executing
+- The generated Python test runner contains mutating API calls — present the script content and test plan to the user and wait for approval before executing
+- `docker exec` with write operations
 
-**Auto-permit mode:** If the user responds with "yes to all", "auto-permit", or grants blanket approval for mutating requests, execute all remaining `curl POST/PUT/PATCH/DELETE` commands without asking for each one individually.
+**Auto-permit mode:** If the user responds with "yes to all", "auto-permit", or grants blanket approval, execute the test runner without further confirmation.
 
 ## Rules
 
-- Never hardcode tokens in output — always refer to them as `$TOKEN`, `$TOKEN_ADMIN`, etc.
-- Always clean up test data created during the run
+- Never hardcode tokens in output or in saved files — always pass them via environment variables (`$TOKEN`, `$TOKEN_ADMIN`, etc.)
+- Always clean up test data created during the run (the Python script handles this automatically)
 - If the server is not reachable, stop at Step 2 and tell the user
-- Use `python3` for JSON parsing — never assume `jq` is available
-- For sequenced tests (create → verify → cleanup), track created IDs and use them in subsequent steps
+- Use only Python standard library (`urllib.request`, `json`, `concurrent.futures`) — never assume third-party packages like `requests` or `jq` are installed
+- Save the test plan to `/tmp/api-e2e-test-plan-<timestamp>.md` and the test runner to `/tmp/api-e2e-runner-<timestamp>.py`
+- For sequenced tests (create → verify → cleanup), track created IDs in the `created_ids` dict and use them in dependent test functions
 - If `$ARGUMENTS` is provided, treat it as the base ref to diff against instead of the auto-detected `$MAIN_REF`
 - When the framework is ambiguous, read a sample route file before guessing — don't assume
 - Always read project documentation (CLAUDE.md, README) before starting — service architecture context is essential
 - When changes affect event handlers, workers, or async flows, behavioral tests are mandatory — not just endpoint CRUD tests
 - Use client/frontend code as a primary source for discovering the correct API URLs, headers, and payload shapes
-- Construct curl URLs using the gateway/proxy prefix discovered from client code, not the raw server-side route path
+- Construct API URLs using the gateway/proxy prefix discovered from client code, not the raw server-side route path
